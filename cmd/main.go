@@ -122,13 +122,25 @@ func cmdUse(args []string) error {
 
 func cmdInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	platform := fs.String("platform", "", `target platform, e.g. debian:12 or ubuntu:22.04`)
-	provider := fs.String("provider", "", "explicit provider override")
+	platform     := fs.String("platform",     "", `target platform, e.g. debian:12 or ubuntu:22.04`)
+	provider     := fs.String("provider",     "", "explicit provider override")
 	downloadOnly := fs.Bool("download-only", false, "fetch package but skip exec and post-install steps")
-	if err := fs.Parse(args); err != nil {
+
+	// Split flags from positional args so the package name can appear
+	// anywhere in the argument list without stopping flag parsing.
+	var flagArgs, posArgs []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			flagArgs = append(flagArgs, a)
+		} else {
+			posArgs = append(posArgs, a)
+		}
+	}
+
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if len(posArgs) < 1 {
 		return fmt.Errorf("usage: env install <pkg>[@<version>] [--platform=<os>:<ver>]")
 	}
 
@@ -137,7 +149,7 @@ func cmdInstall(args []string) error {
 		return err
 	}
 
-	pkg, version := parsePkgArg(fs.Arg(0))
+	pkg, version := parsePkgArg(posArgs[0])
 
 	// human-readable progress line
 	label := pkg

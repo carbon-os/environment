@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/blakesmith/ar"
+	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
@@ -110,7 +111,11 @@ func decompressedTar(r io.Reader, name string) (*tar.Reader, error) {
 		return tar.NewReader(bzip2.NewReader(r)), nil
 
 	case strings.HasSuffix(name, ".zst"):
-		return nil, fmt.Errorf("zstd not yet supported")
+		zr, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("decompress zstd: %w", err)
+		}
+		return tar.NewReader(zr), nil
 
 	default:
 		return nil, fmt.Errorf("unknown data.tar compression: %s", name)

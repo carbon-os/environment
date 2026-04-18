@@ -46,6 +46,7 @@ go run ./cmd/main.go install gcc@13 --platform=ubuntu:22.04
 go build -o env ./cmd/main.go
 
 ./env create myenv
+./env use myenv
 ./env install gcc@13 --platform=ubuntu:22.04
 ./env lock
 ```

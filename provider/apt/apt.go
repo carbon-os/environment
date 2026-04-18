@@ -7,31 +7,42 @@ import (
 )
 
 // Params is what the top-level passes down to the apt provider.
-// Mirrors ProviderParams — apt has no import dependency on the environment package.
 type Params struct {
 	Version      string
-	Platform     string // "debian:12", "ubuntu:22.04", etc.
+	Platform     string
 	DownloadOnly bool
 }
 
 // Apt is the provider for Debian/Ubuntu package installs.
 // It is pure file I/O — no apt-get, no system calls, runs on any host OS.
 type Apt struct {
-	binDir   string // destination for extracted binaries
-	cacheDir string // staging area for downloaded .deb files
+	envDir   string
+	binDir   string
+	cacheDir string
+	logger   Logger // nil = silent
 }
 
-// New returns an Apt provider that installs binaries into binDir.
-func New(binDir string) (*Apt, error) {
+// New returns an Apt provider rooted at envDir.
+// Pass a nil logger to silence all output.
+func New(envDir string, logger Logger) (*Apt, error) {
 	cacheDir := filepath.Join(os.TempDir(), "env-apt-cache")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("apt: init cache dir: %w", err)
 	}
-	return &Apt{binDir: binDir, cacheDir: cacheDir}, nil
+	return &Apt{
+		envDir:   envDir,
+		binDir:   filepath.Join(envDir, "bin"),
+		cacheDir: cacheDir,
+		logger:   logger,
+	}, nil
 }
 
-// Install fetches and unpacks a package from a Debian/Ubuntu mirror.
-// Platform selects the distro — defaults to debian:12 if empty.
+// Install fetches and unpacks a package and all its transitive dependencies.
+//
+// Installation order matches dpkg policy:
+//  1. Pre-Depends (must be configured before the target package is unpacked)
+//  2. Regular Depends (transitive closure, BFS order)
+//  3. The requested package itself
 func (a *Apt) Install(pkg string, params Params) error {
 	target := params.Platform
 	if target == "" {
@@ -53,20 +64,39 @@ func (a *Apt) Install(pkg string, params Params) error {
 		return fmt.Errorf("apt install: %w", err)
 	}
 
-	debPath, err := download(img, meta, a.cacheDir)
+	plan, err := resolveDeps(meta, index, a.logger)
 	if err != nil {
-		return fmt.Errorf("apt install: download: %w", err)
+		return fmt.Errorf("apt install: resolve deps: %w", err)
+	}
+
+	if a.logger != nil {
+		a.logger.DepsResolved(pkg, len(plan.PreDeps), len(plan.Deps))
 	}
 
 	if params.DownloadOnly {
+		allPkgs := append([]packageMeta{meta}, plan.PreDeps...)
+		allPkgs = append(allPkgs, plan.Deps...)
+		for _, m := range allPkgs {
+			if _, err := a.download(img, m); err != nil {
+				return fmt.Errorf("apt install: download %s: %w", m.Name, err)
+			}
+		}
 		return nil
 	}
 
-	if err := unpack(debPath, a.binDir); err != nil {
-		return fmt.Errorf("apt install: unpack: %w", err)
+	for _, dep := range plan.PreDeps {
+		if err := a.installOne(img, dep, true, true); err != nil {
+			return fmt.Errorf("apt install: pre-dep %s: %w", dep.Name, err)
+		}
 	}
 
-	return nil
+	for _, dep := range plan.Deps {
+		if err := a.installOne(img, dep, false, true); err != nil {
+			return fmt.Errorf("apt install: dep %s: %w", dep.Name, err)
+		}
+	}
+
+	return a.installOne(img, meta, false, false)
 }
 
 // Remove deletes a package's binary from the environment bin dir.
@@ -79,6 +109,27 @@ func (a *Apt) Remove(pkg string) error {
 }
 
 // Resolve normalises a package name for apt (passthrough for most packages).
-func (a *Apt) Resolve(pkg string) (string, error) {
-	return pkg, nil
+func (a *Apt) Resolve(pkg string) (string, error) { return pkg, nil }
+
+// installOne downloads and unpacks a single package into the environment root.
+// isPre and isDep are passed straight through to the logger for context.
+func (a *Apt) installOne(img image, meta packageMeta, isPre, isDep bool) error {
+	debPath, err := a.download(img, meta)
+	if err != nil {
+		return err
+	}
+
+	if a.logger != nil {
+		a.logger.Installing(meta.Name, meta.Version, isPre, isDep)
+	}
+
+	if err := unpack(debPath, a.envDir); err != nil {
+		return err
+	}
+
+	if a.logger != nil {
+		a.logger.Installed(meta.Name, meta.Version, isPre, isDep)
+	}
+
+	return nil
 }

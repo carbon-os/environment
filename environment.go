@@ -13,6 +13,24 @@ type Environment struct {
 	Name     string
 	Path     string
 	platform *Platform
+	logger   Logger
+}
+
+// WithLogger attaches a Logger and returns the receiver for chaining.
+//
+//	e, _ := environment.New("myenv")
+//	e.WithLogger(myLogger)
+func (e *Environment) WithLogger(l Logger) *Environment {
+	e.logger = l
+	return e
+}
+
+// log returns the active logger, falling back to a silent NoopLogger.
+func (e *Environment) log() Logger {
+	if e.logger != nil {
+		return e.logger
+	}
+	return NoopLogger{}
 }
 
 // CreateParams controls how a new environment is created.

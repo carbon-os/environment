@@ -1,109 +1,126 @@
 package apt
 
 import (
-	"bufio"
-	"compress/gzip"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
+    "bufio"
+    "compress/gzip"
+    "fmt"
+    "io"
+    "net/http"
+    "strings"
 )
 
-// packageMeta holds the resolved metadata for a single package from the Packages index.
 type packageMeta struct {
-	Name     string
-	Version  string
-	Filename string // relative pool path e.g. pool/main/g/gcc/gcc_13.2.0_amd64.deb
-	SHA256   string
+    Name       string
+    Version    string
+    Filename   string
+    SHA256     string
+    Depends    string // "libc6 (>= 2.36), binutils (>= 2.40), cpp-12 | cpp"
+    PreDepends string // must be installed+configured before unpack
+    Provides   string // virtual package names this package satisfies
+    Essential  bool   // if true, assumed present on any Debian system
 }
 
-// fetchPackageIndex downloads and parses the gzipped Packages index for an image.
 func fetchPackageIndex(img image) (map[string]packageMeta, error) {
-	url := packageIndexURL(img)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("fetch index %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch index %s: status %d", url, resp.StatusCode)
-	}
-
-	gz, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("decompress index: %w", err)
-	}
-	defer gz.Close()
-
-	return parsePackageIndex(gz)
+    url := packageIndexURL(img)
+    resp, err := http.Get(url)
+    if err != nil {
+        return nil, fmt.Errorf("fetch index %s: %w", url, err)
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("fetch index %s: status %d", url, resp.StatusCode)
+    }
+    gz, err := gzip.NewReader(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("decompress index: %w", err)
+    }
+    defer gz.Close()
+    return parsePackageIndex(gz)
 }
 
-// parsePackageIndex parses the Debian Packages stanza format into a name-keyed map.
 func parsePackageIndex(r io.Reader) (map[string]packageMeta, error) {
-	packages := make(map[string]packageMeta)
-	scanner := bufio.NewScanner(r)
+    // name-keyed primary index
+    packages := make(map[string]packageMeta)
+    scanner := bufio.NewScanner(r)
+    scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	// Debian Packages files can have very long lines (base64 checksums).
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+    var cur packageMeta
 
-	var current packageMeta
+    flush := func() {
+        if cur.Name == "" {
+            return
+        }
+        packages[cur.Name] = cur
 
-	flush := func() {
-		if current.Name != "" {
-			packages[current.Name] = current
-			current = packageMeta{}
-		}
-	}
+        // register each virtual name from Provides so lookups work transparently
+        if cur.Provides != "" {
+            for _, raw := range strings.Split(cur.Provides, ",") {
+                vname := parseVirtualName(strings.TrimSpace(raw))
+                if vname != "" && vname != cur.Name {
+                    // only register if no real package has that name yet
+                    if _, exists := packages[vname]; !exists {
+                        packages[vname] = cur
+                    }
+                }
+            }
+        }
+        cur = packageMeta{}
+    }
 
-	for scanner.Scan() {
-		line := scanner.Text()
+    for scanner.Scan() {
+        line := scanner.Text()
+        if line == "" {
+            flush()
+            continue
+        }
+        key, value, ok := strings.Cut(line, ": ")
+        if !ok {
+            continue
+        }
+        switch key {
+        case "Package":
+            cur.Name = value
+        case "Version":
+            cur.Version = value
+        case "Filename":
+            cur.Filename = value
+        case "SHA256":
+            cur.SHA256 = value
+        case "Depends":
+            cur.Depends = value
+        case "Pre-Depends":
+            cur.PreDepends = value
+        case "Provides":
+            cur.Provides = value
+        case "Essential":
+            cur.Essential = strings.ToLower(strings.TrimSpace(value)) == "yes"
+        }
+    }
+    flush()
 
-		if line == "" {
-			flush()
-			continue
-		}
-
-		key, value, ok := strings.Cut(line, ": ")
-		if !ok {
-			continue
-		}
-
-		switch key {
-		case "Package":
-			current.Name = value
-		case "Version":
-			current.Version = value
-		case "Filename":
-			current.Filename = value
-		case "SHA256":
-			current.SHA256 = value
-		}
-	}
-
-	flush()
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("parse index: %w", err)
-	}
-
-	return packages, nil
+    if err := scanner.Err(); err != nil {
+        return nil, fmt.Errorf("parse index: %w", err)
+    }
+    return packages, nil
 }
 
-// findPackage looks up a package by name with an optional version prefix match.
+// parseVirtualName strips a version constraint from a Provides entry.
+// "libc6-udeb (= 2.36)" → "libc6-udeb"
+func parseVirtualName(s string) string {
+    if i := strings.IndexByte(s, '('); i >= 0 {
+        s = strings.TrimSpace(s[:i])
+    }
+    return s
+}
+
 func findPackage(index map[string]packageMeta, pkg, version string) (packageMeta, error) {
-	meta, ok := index[pkg]
-	if !ok {
-		return packageMeta{}, fmt.Errorf("package %q not found in index", pkg)
-	}
-
-	if version != "" && !strings.HasPrefix(meta.Version, version) {
-		return packageMeta{}, fmt.Errorf(
-			"package %q: requested version %q, available %q",
-			pkg, version, meta.Version,
-		)
-	}
-
-	return meta, nil
+    meta, ok := index[pkg]
+    if !ok {
+        return packageMeta{}, fmt.Errorf("package %q not found in index", pkg)
+    }
+    if version != "" && !strings.HasPrefix(meta.Version, version) {
+        return packageMeta{}, fmt.Errorf(
+            "package %q: requested %q, available %q", pkg, version, meta.Version)
+    }
+    return meta, nil
 }

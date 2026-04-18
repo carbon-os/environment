@@ -45,10 +45,12 @@ go run ./cmd/main.go install gcc@13 --platform=ubuntu:22.04
 # output binary named 'env' in the repo root
 go build -o env ./cmd/main.go
 
-./env create myenv
-./env use myenv
-./env install gcc@13 --platform=ubuntu:22.04
-./env lock
+go run main.go create myenv2
+go run main.go use myenv2
+go run main.go install gcc --platform=ubuntu:22.04
+go run main.go lock
+
+go run main.go list
 ```
 
 ---

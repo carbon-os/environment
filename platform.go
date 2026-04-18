@@ -51,7 +51,7 @@ func providerForPlatform(platform string) string {
 	case strings.HasPrefix(platform, "windows"):
 		return "winget"
 	default:
-		return "apt"
+		return "" // unknown — let resolveProvider surface the error
 	}
 }
 

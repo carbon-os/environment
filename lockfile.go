@@ -17,9 +17,12 @@ type LockFile struct {
 }
 
 // LockedPackage is a fully resolved package entry in the lock file.
+// Triplet and VcpkgCommit are only populated for vcpkg-managed packages.
 type LockedPackage struct {
-	Version  string `toml:"version"`
-	Provider string `toml:"provider"`
+	Version     string `toml:"version"`
+	Provider    string `toml:"provider"`
+	Triplet     string `toml:"triplet,omitempty"`      // vcpkg only, e.g. "x64-linux"
+	VcpkgCommit string `toml:"vcpkg_commit,omitempty"` // vcpkg only, e.g. "a34c873"
 }
 
 func readLock(envPath string) (*LockFile, error) {

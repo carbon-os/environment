@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"runtime"
+
 	"github.com/BurntSushi/toml"
 	"github.com/carbon-os/environment"
 )
@@ -121,9 +122,9 @@ func cmdUse(args []string) error {
 
 func cmdInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	platform     := fs.String("platform",      "", "target platform, e.g. debian:12, ubuntu:22.04, macos, windows:11")
-	provider     := fs.String("provider",      "", "explicit provider override (apt, brew, winget)")
-	downloadOnly := fs.Bool("download-only",  false, "fetch package but skip exec and post-install steps")
+	platform     := fs.String("platform",     "", "target platform, e.g. debian:12, ubuntu:22.04, macos, windows:11")
+	provider     := fs.String("provider",     "", "explicit provider override: apt, brew, winget, vcpkg")
+	downloadOnly := fs.Bool("download-only", false, "fetch package but skip exec and post-install steps")
 
 	// Separate flag args from positional args so that pkg@version syntax
 	// doesn't confuse the flag parser.
@@ -140,7 +141,7 @@ func cmdInstall(args []string) error {
 		return err
 	}
 	if len(posArgs) < 1 {
-		return fmt.Errorf("usage: env install <pkg>[@<version>] [--platform=<os>:<ver>]")
+		return fmt.Errorf("usage: env install <pkg>[@<version>] [--platform=<os>:<ver>] [--provider=<p>]")
 	}
 
 	e, err := openActive()
@@ -205,19 +206,25 @@ func cmdList(_ []string) error {
 	}
 	sort.Strings(names)
 
-	fmt.Printf("\n%-32s %-16s %s\n", "package", "version", "platform")
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Printf("\n%-28s %-16s %-12s %s\n", "package", "version", "provider", "platform")
+	fmt.Println(strings.Repeat("─", 68))
 	for _, n := range names {
 		p := idx.Packages[n]
+
 		ver := p.Version
 		if ver == "" {
 			ver = "(any)"
+		}
+		prov := p.Provider
+		if prov == "" {
+			prov = "(auto)"
 		}
 		plat := p.Platform
 		if plat == "" {
 			plat = "(host)"
 		}
-		fmt.Printf("%-32s %-16s %s\n", n, ver, plat)
+
+		fmt.Printf("%-28s %-16s %-12s %s\n", n, ver, prov, plat)
 	}
 
 	return nil
@@ -362,7 +369,6 @@ func cmdConfig(args []string) error {
 
 // ── fancy CLI logger ──────────────────────────────────────────────────────────
 
-// ANSI escape codes — no external dependencies.
 const (
 	ansiReset  = "\033[0m"
 	ansiBold   = "\033[1m"
@@ -373,14 +379,11 @@ const (
 	ansiCyan   = "\033[36m"
 )
 
-// cliLogger renders pip-style progress to stdout.
-// Downloads and installs share a single animated line per package; the line is
-// finalised with a newline and a ✔ once the package is installed.
 type cliLogger struct {
 	mu         sync.Mutex
-	inProgress bool   // a \r progress line is currently on-screen
-	lastPct    int    // last printed percentage — throttles DownloadProgress redraws
-	lineTag    string // tag portion of the current progress line (for redraw)
+	inProgress bool
+	lastPct    int
+	lineTag    string
 	lineName   string
 	lineVer    string
 	lineTotal  int64
@@ -388,7 +391,6 @@ type cliLogger struct {
 
 func newCLILogger() *cliLogger { return &cliLogger{} }
 
-// pkgTag returns the colour-coded, fixed-width label for a package's role.
 func pkgTag(isPre, isDep bool) string {
 	switch {
 	case isPre:
@@ -400,9 +402,6 @@ func pkgTag(isPre, isDep bool) string {
 	}
 }
 
-// renderProgressLine builds the full \r line for a download in progress.
-//
-//	  pre-dep  libc6              2.36-9+deb12u3   ████████████░░░░░░░░  1.4/2.8 MB
 func renderProgressLine(tag, name, ver string, received, total int64) string {
 	const barWidth = 20
 	bar := buildBar(received, total, barWidth)
@@ -436,8 +435,6 @@ func (l *cliLogger) Collecting(pkg, version, platform, arch string) {
 }
 
 func (l *cliLogger) DepsResolved(pkg string, preDeps, deps int) {
-	// For winget (preDeps == 0, deps == 0) skip the line entirely — it adds
-	// no information and would look odd for a package manager with no dep graph.
 	if preDeps == 0 && deps == 0 {
 		return
 	}
@@ -473,9 +470,7 @@ func (l *cliLogger) DownloadProgress(name string, received, total int64) {
 	fmt.Printf("\r%s", line)
 }
 
-func (l *cliLogger) DownloadDone(name, version string) {
-	// Nothing to do here — Installed will finalise the line.
-}
+func (l *cliLogger) DownloadDone(name, version string) {}
 
 func (l *cliLogger) Installing(name, version string, isPre, isDep bool) {
 	l.mu.Lock()
@@ -635,33 +630,30 @@ USAGE
   env <command> [flags] [args]
 
 COMMANDS
-  create <name> [--path <dir>]                create a new environment
-  use    <name|path>                          activate an environment
-  install <pkg>[@<ver>] [--platform=<p>]      install a package
+  create <name> [--path <dir>]                         create a new environment
+  use    <name|path>                                   activate an environment
+  install <pkg>[@<ver>] [--platform=<p>]               install a package
           [--provider=<p>] [--download-only]
-  remove  <pkg>                               remove a package
-  list                                        list installed packages
-  lock                                        resolve and freeze to index.lock
-  sync    [--dry-run]                         restore from index.lock
-  shell                                       drop into an env-aware shell
-  run     <command>                           run a command inside the environment
-  destroy <name>                              delete an environment
-  config  set   <key> <value>                 write a global config value
-  config  get   <key>                         read a global config value
-  config  unset <key>                         clear a global config value
+  remove  <pkg>                                        remove a package
+  list                                                 list installed packages
+  lock                                                 resolve and freeze to index.lock
+  sync    [--dry-run]                                  restore from index.lock
+  shell                                                drop into an env-aware shell
+  run     <command>                                    run a command inside the environment
+  destroy <name>                                       delete an environment
+  config  set   <key> <value>                          write a global config value
+  config  get   <key>                                  read a global config value
+  config  unset <key>                                  clear a global config value
 
 CONFIG KEYS
   base-path    default directory for new environments (default: ~/.env/envs)
   apt.mirror   custom apt mirror URL
 
 PROVIDERS
-  apt     debian, ubuntu
-  brew    macos, linux
-  winget  windows
-
-WINGET PACKAGES
-  Packages use the Publisher.Package identifier format from the winget-pkgs
-  repository. Set GITHUB_TOKEN to avoid unauthenticated rate limits.
+  apt     debian, ubuntu  (binary)
+  brew    macos, linux    (binary)
+  winget  windows         (binary)
+  vcpkg   any platform    (built from source)
 
 EXAMPLES
   env create myenv
@@ -669,8 +661,9 @@ EXAMPLES
   env install gcc@13 --platform=ubuntu:22.04
   env install python@3.12
   env install cmake --platform=macos
+  env install openssl@3.3.0 --provider=vcpkg
+  env install boost --provider=vcpkg
   env install Microsoft.PowerShell@7 --platform=windows:11
-  env install Neovim.Neovim --platform=windows:11
   env lock
   env sync
   env run gcc --version

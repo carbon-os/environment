@@ -32,8 +32,8 @@ switch environments. Nothing conflicts. Nothing bleeds.
   any host. Running macOS? Install a Debian package. Running Linux? Install a
   Windows package. It's just downloading and unpacking files.
 
-- **Backed by native providers** — brew, apt, winget. Package platforms you
-  already trust, now managed in a controlled and reproducible way.
+- **Backed by native providers** — brew, apt, winget, vcpkg. Package platforms
+  you already trust, now managed in a controlled and reproducible way.
 
 ---
 
@@ -90,23 +90,24 @@ env lock                # freeze to index.lock
 ## Commands
 
 ```bash
-env create <name>                          # create a new environment
-env create <name> --path <dir>             # create at a specific path
-env use <name>                             # activate an environment
-env install <pkg>                          # install a package
-env install <pkg>@<version>                # install a pinned version
-env install <pkg> --platform=<os>:<version>          # target a specific platform
-env install <pkg>@<version> --platform=<os>:<version> # pinned pkg + platform target
-env list                                   # list installed packages
-env lock                                   # resolve and freeze to index.lock
-env sync                                   # restore environment from index.lock
-env shell                                  # drop into a shell with env loaded
-env run <cmd>                              # run a command inside the environment
-env remove <pkg>                           # remove a package
-env destroy <name>                         # delete an environment entirely
-env config set <key> <value>               # set a global config value
-env config get <key>                       # inspect a global config value
-env config unset <key>                     # remove a global config value
+env create <name>                                      # create a new environment
+env create <name> --path <dir>                         # create at a specific path
+env use <name>                                         # activate an environment
+env install <pkg>                                      # install a package
+env install <pkg>@<version>                            # install a pinned version
+env install <pkg> --platform=<os>:<version>            # target a specific platform
+env install <pkg>@<version> --platform=<os>:<version>  # pinned pkg + platform target
+env install <pkg> --provider=vcpkg                     # build from source via vcpkg
+env list                                               # list installed packages
+env lock                                               # resolve and freeze to index.lock
+env sync                                               # restore environment from index.lock
+env shell                                              # drop into a shell with env loaded
+env run <cmd>                                          # run a command inside the environment
+env remove <pkg>                                       # remove a package
+env destroy <name>                                     # delete an environment entirely
+env config set <key> <value>                           # set a global config value
+env config get <key>                                   # inspect a global config value
+env config unset <key>                                 # remove a global config value
 ```
 
 ---
@@ -194,6 +195,76 @@ cmake = { version = "3.28.1", provider = "apt" }
 
 ---
 
+## Building from Source with vcpkg
+
+The `vcpkg` provider builds C and C++ packages from source. When a package is
+installed via vcpkg, `env` bootstraps a dedicated build environment in the
+background — no manual setup required. This includes cmake, gcc, g++, ninja,
+and any other toolchain dependencies vcpkg needs to compile the package. The
+build environment is internal to the `env` environment and never touches your
+host system.
+
+```bash
+env install zlib --provider=vcpkg
+env install openssl@3.3.0 --provider=vcpkg
+env install boost --provider=vcpkg --platform=windows:11
+```
+
+### How it works
+
+1. On first use, `env` bootstraps vcpkg inside the active environment at
+   `~/.env/envs/<name>/vcpkg/`.
+2. A default build toolchain is auto-configured — cmake, gcc, and g++ are
+   provisioned silently using the host's native provider (brew, apt, or winget)
+   scoped to the environment. Nothing is installed globally.
+3. The requested package is compiled and its outputs (headers, libs, binaries)
+   are placed under the environment's prefix, alongside any other installed
+   packages.
+4. `env lock` captures the exact vcpkg commit, triplet, and resolved version so
+   the build is fully reproducible.
+
+You never need to invoke vcpkg directly. `env` owns the bootstrap, the
+toolchain, and the build — vcpkg is an implementation detail.
+
+### vcpkg toolchain auto-setup
+
+| Tool | Provisioned via |
+|------|----------------|
+| `cmake` | brew / apt / winget (host-native, env-scoped) |
+| `gcc` | brew / apt / winget (host-native, env-scoped) |
+| `g++` | brew / apt / winget (host-native, env-scoped) |
+| `ninja` | brew / apt / winget (host-native, env-scoped) |
+| `vcpkg` | bootstrapped from source, pinned to a commit |
+
+These are provisioned automatically the first time a vcpkg package is installed
+into an environment. Subsequent installs reuse the existing toolchain.
+
+### index.toml representation
+
+```toml
+[packages]
+python  = { version = "3.12" }
+gcc     = { version = "13", platform = "ubuntu:22.04" }
+openssl = { version = "3.3.0", provider = "vcpkg" }
+boost   = { version = "1.85.0", provider = "vcpkg" }
+```
+
+### index.lock representation
+
+```toml
+[platform.linux.amd64]
+python = { version = "3.12.2", provider = "apt" }
+
+[platform.linux.amd64.ubuntu.22_04]
+gcc = { version = "13.2.0", provider = "apt" }
+
+[platform.linux.amd64.vcpkg]
+openssl = { version = "3.3.2", provider = "vcpkg", triplet = "x64-linux", vcpkg_commit = "a34c873" }
+boost   = { version = "1.85.0", provider = "vcpkg", triplet = "x64-linux", vcpkg_commit = "a34c873" }
+```
+
+---
+
 ## index.toml
 
 ```toml
@@ -209,9 +280,10 @@ linux.arm64   = "apt"
 windows.amd64 = "winget"
 
 [packages]
-gcc    = { version = "13", platform = "ubuntu:22.04" }
-cmake  = { version = "3.28", platform = "debian:11" }
-python = { version = "3.12" }
+gcc     = { version = "13", platform = "ubuntu:22.04" }
+cmake   = { version = "3.28", platform = "debian:11" }
+python  = { version = "3.12" }
+openssl = { version = "3.3.0", provider = "vcpkg" }
 ```
 
 ---
@@ -232,17 +304,21 @@ gcc = { version = "13.2.0", provider = "apt" }
 
 [platform.linux.amd64.debian.11]
 cmake = { version = "3.28.1", provider = "apt" }
+
+[platform.linux.amd64.vcpkg]
+openssl = { version = "3.3.2", provider = "vcpkg", triplet = "x64-linux", vcpkg_commit = "a34c873" }
 ```
 
 ---
 
 ## Supported Providers
 
-| Provider | Platform |
-|----------|----------|
-| `brew`   | macOS, Linux |
-| `apt`    | Debian, Ubuntu |
-| `winget` | Windows |
+| Provider | Platform | Source |
+|----------|----------|--------|
+| `brew`   | macOS, Linux | binary |
+| `apt`    | Debian, Ubuntu | binary |
+| `winget` | Windows | binary |
+| `vcpkg`  | macOS, Linux, Windows | built from source |
 
 ---
 
@@ -255,6 +331,7 @@ env use myenv
 env install gcc@13 --platform=ubuntu:22.04
 env install cmake@3.28 --platform=debian:11
 env install python@3.12
+env install openssl@3.3.0 --provider=vcpkg
 env lock
 # commit both index.toml and index.lock
 
@@ -284,6 +361,11 @@ e.Install("python", environment.InstallParams{
     Version: "3.12",
 })
 
+e.Install("openssl", environment.InstallParams{
+    Version:  "3.3.0",
+    Provider: "vcpkg",
+})
+
 e.Lock()
 e.Run("gcc --version", environment.RunParams{})
 ```
@@ -310,6 +392,13 @@ carbon-os/environment
       index.go        # Packages index fetch and parse
       download.go     # .deb download
       unpack.go       # ar + tar extraction
+    vcpkg/
+      vcpkg.go        # Vcpkg provider
+      bootstrap.go    # vcpkg clone and bootstrap
+      toolchain.go    # cmake, gcc, g++ auto-provisioning
+      triplet.go      # target triplet resolution
+      install.go      # package build and install
+      manifest.go     # vcpkg.json generation
 ```
 
 ---

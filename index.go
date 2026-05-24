@@ -28,6 +28,7 @@ type EnvMeta struct {
 type PackageEntry struct {
 	Version  string `toml:"version,omitempty"`
 	Platform string `toml:"platform,omitempty"`
+	Provider string `toml:"provider,omitempty"` // explicit provider override, e.g. "vcpkg"
 }
 
 func readIndex(envPath string) (*Index, error) {
